@@ -173,6 +173,15 @@ class VKAdapter(BasePlatformAdapter):
         # Rate limiters for different operation types
         self._limiters = get_rate_limiters()
 
+        # Typing indicator throttling: track last send time per chat
+        # to avoid hitting VK flood control (error 9).
+        self._last_typing_time: Dict[str, float] = {}
+        # Minimum interval between typing indicator sends (seconds).
+        # VK starts returning error 9 "Flood control" when setActivity
+        # is called more than ~once per 5-6 seconds per peer.
+        # при 5сек. индфитор успевает исчезнуть. Флудконтроль срабатывает при нескольких отправках в секунду
+        self._typing_cooldown: float = 3.0
+
         self._http_client: Optional["httpx.AsyncClient"] = None
 
     # ------------------------------------------------------------------
@@ -637,16 +646,47 @@ class VKAdapter(BasePlatformAdapter):
                 return SendResult(success=False, error=str(e), retryable=True)
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
-        """Send typing indicator via VK messages.setActivity."""
+        """Send typing indicator via VK messages.setActivity with throttling."""
         if not self._http_client or not self._token:
             return
+
         try:
-            await self._vk_api_call("messages.setActivity", {
-                "peer_id": chat_id,
-                "type": "typing",
-            })
-        except Exception:
-            pass  # Typing indicator is best-effort
+            peer_id = int(chat_id)
+        except (ValueError, TypeError):
+            logger.warning("[VK] send_typing invalid chat_id=%s", chat_id)
+            return
+
+        logger.info("[VK] send_typing called for chat_id=%s", chat_id)
+
+        # Throttle: skip if we sent typing recently for this chat.
+        # Prevents VK flood control (error 9) from aggressive _keep_typing.
+        now = time.monotonic()
+        last = self._last_typing_time.get(chat_id, 0.0)
+        if now - last < self._typing_cooldown:
+            logger.info("[VK] send_typing THROTTLED for chat_id=%s (last=%.1fs ago)", chat_id, now - last)
+            return
+        self._last_typing_time[chat_id] = now
+
+        params: Dict[str, Any] = {
+            "peer_id": peer_id,
+            "type": "typing",
+        }
+
+        # При отправке без group_id перестает работать прямое общение 1 на 1 в чате с пользователем.
+        # group_id обязательно указывать если откравляешь сообьщение пользователю (0 < peer_id < 2000000000)
+        if self._group_id: # and 0 < peer_id < 2000000000: Фильтровал для исключения ошибки при отправке в групповой чат. Но это внутренняя ошибка ВК. Сожет починят
+            params["group_id"] = self._group_id
+            
+        logger.info("[VK] send_typing EXECUTING for chat_id=%s", chat_id)
+        try:
+            # Bypass the global API limiter: typing is time-sensitive and the
+            # per-peer throttle above already prevents floods.
+            result = await self._vk_api_call_with_token(
+                "messages.setActivity", params, token=self._token
+            )
+            logger.info("[VK] send_typing RESULT for chat_id=%s: %s", chat_id, result)
+        except Exception as e:
+            logger.error("[VK] send_typing ERROR for chat_id=%s: %s", chat_id, e)
 
     async def send_carousel(
         self,
