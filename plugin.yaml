@@ -1,0 +1,28 @@
+name: vk
+label: VK Messenger
+kind: platform
+version: 1.0.0
+description: VK Messenger (ВКонтакте) platform adapter via Long Poll API
+author: Arnis
+requires_env:
+  - name: VK_GROUP_TOKEN
+    description: "VK Community access token (from group settings → API → Key)"
+    prompt: "VK Group Token"
+    password: true
+optional_env:
+  - name: VK_GROUP_ID
+    description: "VK Community ID (numeric, e.g. 123456789)"
+    prompt: "VK Group ID"
+    password: false
+  - name: VK_ALLOWED_USERS
+    description: "Comma-separated list of allowed VK user IDs"
+    prompt: "Allowed VK User IDs"
+    password: false
+  - name: VK_ALLOW_ALL_USERS
+    description: "Set to 'true' to allow all users to chat with the bot"
+    prompt: "Allow all users"
+    password: false
+  - name: VK_HOME_CHANNEL
+    description: "Default chat ID for cron delivery"
+    prompt: "VK Home Chat ID"
+    password: false
