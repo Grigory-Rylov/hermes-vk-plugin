@@ -2,18 +2,22 @@
 
 Плагин для интеграции [Hermes Agent](https://github.com/nousresearch/hermes-agent) с ВКонтакте (VK) через Bots Long Poll API.
 
-**Автор:** Арнис (Arnis)
+**Автор:** Арнис (Arnis)  
 **Лицензия:** MIT
 
 ## Возможности
 
 - Подключение к VK Bots Long Poll API в реальном времени
 - Приём и обработка входящих сообщений (личные + беседы)
-- Отправка ответов от имени группы
+- Отправка ответов от имени сообщества (группы)
+- **Два потока общения:** основной чат для обычных сообщений и отдельный чат reasoning/thinking для процесса размышления ИИ
 - Поддержка Callback API формата событий
 - Авто-регистрация платформы через `_missing_()` (не требует правок core Hermes)
 - Политики доступа: `open`, `allowlist`, `disabled`
-- IPv4-only коннектор (для WSL и окружений без IPv6)
+- Обработка вложений: фото, документы, аудио, голосовые сообщения, стикеры
+- Автоматическое разделение длинных сообщений (>4096 символов)
+- Flood control с автоматической повторной отправкой (retry with backoff)
+- Кэширование имён пользователей
 
 ## Установка
 
@@ -33,8 +37,7 @@ hermes plugins enable vk
 ### .env (обязательно)
 
 ```bash
-VK_GROUP_TOKEN=vk1.a.YourGroupTokenHere
-VK_GROUP_ID=123456789
+VK_GROUP_TOKEN=vk1.a.YourGroupTokenHere   # токен сообщества (группы)
 ```
 
 ### config.yaml
@@ -45,17 +48,18 @@ gateway:
     vk:
       enabled: true
       extra:
-        group_id: 239730227
-        dm_policy: open      # open | allowlist | disabled
-        group_policy: open    # open | allowlist | disabled
+        group_id: "239730227"              # ID сообщества
+        home_channel: "2000000001"         # основной чат
+        thinking_peer_id: "2000000002"     # чат для reasoning/thinking
+        dmPolicy: open
+        groupPolicy: open
 ```
 
-### Опционально
+### Опционально (через env)
 
 ```bash
 VK_ALLOWED_USERS=12345,67890      # Список разрешённых пользователей
 VK_ALLOW_ALL_USERS=true           # Разрешить всех
-VK_HOME_CHANNEL=25857898          # Канал для cron-уведомлений
 ```
 
 ## Запуск
@@ -70,20 +74,27 @@ hermes gateway run --verbose
 
 ## Как это работает
 
+Плагин использует **токен сообщества** (группы) — именно он позволяет боту корректно работать с Long Poll API и отправлять сообщения от имени группы. Личные токены не поддерживаются.
+
 1. Плагин регистрирует платформу `vk` через `platform_registry`
 2. Gateway при старте создаёт `VKAdapter` и вызывает `connect()`
-3. Адаптер получает Long Poll сервер через `groups.getLongPollServer`
+3. Адаптер получает Long Poll сервер через `messages.getLongPollServer` (не `groups.getBotsLongPollServer`)
 4. Запускается `_poll_loop()` — бесконечный цикл опроса событий
-5. При получении `message_new` создаётся `MessageEvent` и передаётся в Hermes
-6. Hermes обрабатывает сообщение и отправляет ответ через `messages.send`
+5. При получении `message_new`:
+   - Вложения скачиваются и преобразуются в `MEDIA:` теги для Hermes
+   - Создаётся `MessageEvent` и передаётся в Hermes
+6. Hermes обрабатывает сообщение:
+   - **Основной поток** — финальный ответ отправляется в основной чат (`home_channel`)
+   - **Reasoning/thinking поток** — промежуточные размышления ИИ направляются в отдельный чат (`thinking_peer_id`), если он настроен
+7. Ответы от Hermes отправляются через `messages.send` с flood control и retry
 
 ## Структура файлов
 
 ```
 hermes-vk-plugin/
-├── plugin.yaml    # Метаданные плагина
+├── plugin.yaml    # Метаданные плагина + env vars
 ├── __init__.py    # Точка входа, регистрация платформы
-├── adapter.py     # VKAdapter — Long Poll + API
+├── adapter.py     # VKAdapter — Long Poll + API (основная логика)
 └── README.md      # Этот файл
 ```
 
@@ -92,7 +103,7 @@ hermes-vk-plugin/
 - Hermes Agent (совместимо с версией, где есть `Platform._missing_()`)
 - Python 3.11+
 - aiohttp
-- Токен группы VK с правами `messages`
+- Токен **сообщества** VK с правами `messages` (личный токен не подойдёт)
 
 ## Известные особенности
 

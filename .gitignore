@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 *.pyo
 .env
+.env.*
+config.yaml
+secrets/
+*.key
+*.pem
