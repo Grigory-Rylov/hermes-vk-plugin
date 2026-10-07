@@ -1,6 +1,6 @@
 name: vk
 kind: platform
-version: 1.4.3
+version: 1.5.0
 author: Dolgof@voima
 repository: https://github.com/dolgof/hermes-vk-plugin
 docs: https://dev.vk.com/en/api/community-messages/getting-started
@@ -10,6 +10,8 @@ description: VK Messenger (VK Мессенджер) platform adapter. Uses VK Co
   media download.
 requires_env:
 - VK_GROUP_TOKEN
+provides_tools:
+- vk_send_file
 install_hint: pip install httpx
 config_schema:
   type: object
