@@ -20,6 +20,9 @@ config_schema:
     api_version:
       type: string
       default: '5.199'
+    progressChatId:
+      type: string
+      description: Peer id of a separate chat that receives tool progress, heartbeats and busy acks (empty = same chat)
     dmPolicy:
       type: string
       enum:

@@ -11,6 +11,10 @@
 #   dmPolicy: "open"
 #   groupPolicy: "open"
 
+  # Отдельный чат для прогресса ("💻 Running …", "⏳ Working …", busy acks).
+  # Пусто/отсутствует — весь вывод в основной чат.
+  # progressChatId: "2000000002"
+
 # === Multi-account ===
 # vk:
 #   api_version: "5.199"

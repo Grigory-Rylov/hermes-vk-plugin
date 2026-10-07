@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -183,6 +184,18 @@ class VKAdapter(BasePlatformAdapter):
         self._typing_cooldown: float = 3.0
 
         self._http_client: Optional["httpx.AsyncClient"] = None
+
+        # --- Progress/reasoning lane routing ---
+        # Tool-progress bubbles ("💻 Running …"), "⏳ Working" heartbeats, busy
+        # acks and interim commentary land in a separate chat so the main
+        # conversation keeps only real replies. Empty string disables routing.
+        self._progress_chat_id = str(
+            extra.get("progressChatId") or os.getenv("VK_PROGRESS_CHAT_ID", "") or ""
+        ).strip()
+        # Ids of messages redirected to the progress chat: the gateway keeps
+        # editing/deleting them with the ORIGINAL chat id, so peer_id must be
+        # overridden from this set for messages.edit / messages.delete.
+        self._progress_msg_ids: set = set()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -570,6 +583,50 @@ class VKAdapter(BasePlatformAdapter):
             except Exception as e:
                 return SendResult(success=False, error=str(e), retryable=True)
 
+    # ------------------------------------------------------------------
+    # Progress-lane routing
+    # ------------------------------------------------------------------
+
+    # Gateway functions that render the progress/status lane. Hermes sends
+    # those through the same adapter.send() as turn-final replies without
+    # any platform-scoped metadata; the stable seam is the caller frame in
+    # gateway/run_turn_runner.py / run_turn.py / run_busy.py. If upstream
+    # renames them the check degrades to "main chat" — never misroutes.
+    _PROGRESS_LANE_FUNCS = frozenset({
+        "send_progress_messages",       # tool-progress bubble loop
+        "_progress_send_or_edit",       # bubble first send
+        "_edit_progress_message",       # bubble edits
+        "_run_agent_notify_long_running",  # "⏳ Working — N min" heartbeat
+        "_send_busy_reply",             # busy ack ("⏳ Working — … iteration …")
+        "_send_busy_ack_reply",
+    })
+
+    def _progress_lane_caller(self) -> bool:
+        """True when a gateway progress/status function is on our call stack."""
+        try:
+            frame = sys._getframe(3)
+        except (ValueError, AttributeError):
+            return False
+        for _ in range(8):
+            if frame is None:
+                break
+            code = frame.f_code
+            if (
+                code.co_name in self._PROGRESS_LANE_FUNCS
+                and "/gateway/" in code.co_filename.replace("\\", "/")
+            ):
+                return True
+            frame = frame.f_back
+        return False
+
+    def _route_progress(self, chat_id: str, metadata: Optional[Dict[str, Any]]) -> str:
+        """Redirect progress/status sends to the reasoning chat when enabled."""
+        if not self._progress_chat_id or str(chat_id) == self._progress_chat_id:
+            return chat_id
+        if (metadata or {}).get("_interim_send") or self._progress_lane_caller():
+            return self._progress_chat_id
+        return chat_id
+
     async def send(
         self,
         chat_id: str,
@@ -579,6 +636,8 @@ class VKAdapter(BasePlatformAdapter):
     ) -> SendResult:
         if not self._http_client or not self._token:
             return SendResult(success=False, error="Not connected")
+
+        chat_id = self._route_progress(chat_id, metadata)
 
         # Check for keyboard in metadata
         keyboard = None
@@ -631,6 +690,8 @@ class VKAdapter(BasePlatformAdapter):
                 if result and "response" in result:
                     msg_id = str(result["response"])
                     await self._register_outgoing(msg_id)
+                    if self._progress_chat_id and str(chat_id) == self._progress_chat_id:
+                        self._progress_msg_ids.add(msg_id)
                     return SendResult(
                         success=True,
                         message_id=msg_id,
@@ -649,6 +710,7 @@ class VKAdapter(BasePlatformAdapter):
         """Send typing indicator via VK messages.setActivity with throttling."""
         if not self._http_client or not self._token:
             return
+        chat_id = self._route_progress(chat_id, metadata)
 
         try:
             peer_id = int(chat_id)
@@ -861,7 +923,11 @@ class VKAdapter(BasePlatformAdapter):
 
         plain_text, format_data = self._format_content_raw(content)
         params = {
-            "peer_id": chat_id,
+            "peer_id": (
+                self._progress_chat_id
+                if str(message_id) in self._progress_msg_ids
+                else chat_id
+            ),
             "message_id": message_id,
             "message": plain_text,
         }
@@ -887,7 +953,11 @@ class VKAdapter(BasePlatformAdapter):
             return False
 
         params = {
-            "peer_id": chat_id,
+            "peer_id": (
+                self._progress_chat_id
+                if str(message_id) in self._progress_msg_ids
+                else chat_id
+            ),
             "cmids": message_id,
             "delete_for_all": 1,
         }
