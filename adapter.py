@@ -582,6 +582,109 @@ class VKAdapter(BasePlatformAdapter):
                 return SendResult(success=False, error=str(result))
             except Exception as e:
                 return SendResult(success=False, error=str(e), retryable=True)
+    # ------------------------------------------------------------------
+    # Exec approval (interactive callback buttons)
+    # ------------------------------------------------------------------
+
+    _APPROVAL_TAG = "hermes_approval"
+    _APPROVAL_CHOICES = frozenset({"once", "session", "always", "deny"})
+    _APPROVAL_TOAST = {
+        "once": "Разрешено один раз",
+        "session": "Разрешено до конца сессии",
+        "always": "Разрешено навсегда",
+        "deny": "Запрещено — команда не выполнена",
+    }
+
+    async def _send_exec_approval_prompt(self, prompt) -> SendResult:
+        """Render the approval card with one callback button per action; a press
+        resolves via tools.approval.resolve_gateway_approval (_resolve_approval_click).
+        Overriding this hook is what flips supports_exec_approval_buttons() on."""
+        kb = VKKeyboard(inline=True)
+        for label, choice, style in prompt.actions:
+            color = {"once": "positive", "deny": "negative"}.get(choice) or \
+                {"primary": "primary", "danger": "negative"}.get(style, "secondary")
+            payload = json.dumps(
+                {self._APPROVAL_TAG: {"s": prompt.session_key, "c": choice}},
+                ensure_ascii=False,
+            )
+            kb.add_button(label[:40], payload=payload, color=color, action_type="callback")
+            kb.row()
+        return await self.send_keyboard(prompt.chat_id, prompt.text, kb)
+
+    def _parse_approval_payload(self, payload_raw) -> Optional[Tuple[str, str]]:
+        try:
+            payload = json.loads(payload_raw) if isinstance(payload_raw, str) else payload_raw
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        data = payload.get(self._APPROVAL_TAG)
+        if not isinstance(data, dict):
+            return None
+        session_key = str(data.get("s") or "")
+        choice = str(data.get("c") or "")
+        if not session_key or choice not in self._APPROVAL_CHOICES:
+            return None
+        return session_key, choice
+
+    @staticmethod
+    def _approval_click_authorized(session_key: str, user_id, peer_id) -> bool:
+        """agent:<ns>:vk:<chat_type>:<chat_id>[:<user_id>]: the clicker must be the
+        session owner — in group chats the key carries the user, in DMs the chat is
+        the user."""
+        parts = session_key.split(":")
+        if len(parts) < 5 or parts[0] != "agent" or parts[2] != "vk":
+            return False
+        chat_type, chat_id = parts[3], parts[4]
+        if chat_type == "dm":
+            return str(peer_id) == chat_id or str(user_id or "") == chat_id
+        session_user = parts[5] if len(parts) > 5 else ""
+        return str(peer_id) == chat_id and bool(session_user) and str(user_id or "") == session_user
+
+    async def _resolve_approval_click(
+        self, data: Tuple[str, str], obj: dict, event_id: str, peer_id, user_id,
+    ) -> None:
+        session_key, choice = data
+        if not self._approval_click_authorized(session_key, user_id, peer_id):
+            logger.warning("[VK] Rejected approval click from user %s for session %s", user_id, session_key)
+            await self._answer_callback_event(
+                event_id, peer_id, user_id,
+                json.dumps({"type": "show_snackbar", "text": "Этот запрос не для вас"}, ensure_ascii=False),
+            )
+            return
+        count = 0
+        try:
+            from tools.approval import resolve_gateway_approval
+            count = resolve_gateway_approval(session_key, choice)
+        except Exception as e:
+            logger.error("[VK] resolve_gateway_approval failed for %s: %s", session_key, e)
+        toast = self._APPROVAL_TOAST[choice] if count else "Этот запрос уже не активен"
+        await self._answer_callback_event(
+            event_id, peer_id, user_id,
+            json.dumps({"type": "show_snackbar", "text": toast}, ensure_ascii=False),
+        )
+        message_id = obj.get("message_id")
+        conversation_id = obj.get("conversation_id") or peer_id
+        if message_id and conversation_id:
+            mark = "❌" if choice == "deny" else "✅"
+            await self._retire_approval_card(str(conversation_id), str(message_id), f"{mark} {toast}")
+        logger.info(
+            "[VK] Approval button resolved %d approval(s) (session=%s choice=%s user=%s)",
+            count, session_key, choice, user_id,
+        )
+
+    async def _retire_approval_card(self, chat_id: str, message_id: str, text: str) -> None:
+        """Replace the card with the verdict and drop the buttons (a second press
+        must not look actionable after the approval is gone)."""
+        try:
+            await self._vk_api_call("messages.edit", {
+                "peer_id": chat_id,
+                "message_id": message_id,
+                "message": text,
+                "keyboard": build_remove_keyboard(),
+            })
+        except Exception as e:
+            logger.debug("[VK] approval card edit failed: %s", e)
 
     # ------------------------------------------------------------------
     # Progress-lane routing
@@ -1613,6 +1716,10 @@ class VKAdapter(BasePlatformAdapter):
         payload_raw = obj.get("payload", "")
 
         if not peer_id or not event_id:
+            return
+        approval = self._parse_approval_payload(payload_raw)
+        if approval:
+            await self._resolve_approval_click(approval, obj, event_id, peer_id, user_id)
             return
 
         # Parse payload
