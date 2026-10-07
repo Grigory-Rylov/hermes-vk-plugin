@@ -1,6 +1,14 @@
 <!-- fullWidth: false tocVisible: false tableWrap: true -->
 # CHANGELOG
 
+## v1.5.1 (2026-10-07)
+
+### Исправлено
+
+- **Запросы на подтверждение команды** («⚠️ Hermes wants to run a command that needs your OK»
+  и уведомление о таймауте) больше не уходят в reasoning-чат: они требуют ответа `/approve`
+  и доставляются в основной чат.
+
 ## v1.5.0 (2026-10-07)
 
 ### Добавлено

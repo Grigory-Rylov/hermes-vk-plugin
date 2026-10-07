@@ -602,8 +602,16 @@ class VKAdapter(BasePlatformAdapter):
         "_send_watcher_message",        # background process started/finished/failed
     })
 
-    def _progress_lane_caller(self) -> bool:
-        """True when a gateway progress/status function is on our call stack."""
+    # Interactive prompts must reach the chat where the user answers them.
+    # The gateway marks the approval prompt with metadata["is_approval_prompt"];
+    # the timed-out notice rides the same interim lane without a marker, so
+    # its sender function is the exclusion seam.
+    _MAIN_CHAT_FUNCS = frozenset({
+        "_post_timeout_notice",         # "approval timed out — command did NOT run"
+    })
+
+    def _gateway_frame_on_stack(self, func_names: frozenset) -> bool:
+        """True when a gateway function from func_names is on our call stack."""
         try:
             frame = sys._getframe(3)
         except (ValueError, AttributeError):
@@ -613,7 +621,7 @@ class VKAdapter(BasePlatformAdapter):
                 break
             code = frame.f_code
             if (
-                code.co_name in self._PROGRESS_LANE_FUNCS
+                code.co_name in func_names
                 and "/gateway/" in code.co_filename.replace("\\", "/")
             ):
                 return True
@@ -624,7 +632,11 @@ class VKAdapter(BasePlatformAdapter):
         """Redirect progress/status sends to the reasoning chat when enabled."""
         if not self._progress_chat_id or str(chat_id) == self._progress_chat_id:
             return chat_id
-        if (metadata or {}).get("_interim_send") or self._progress_lane_caller():
+        if (metadata or {}).get("is_approval_prompt"):
+            return chat_id
+        if self._gateway_frame_on_stack(self._MAIN_CHAT_FUNCS):
+            return chat_id
+        if (metadata or {}).get("_interim_send") or self._gateway_frame_on_stack(self._PROGRESS_LANE_FUNCS):
             return self._progress_chat_id
         return chat_id
 

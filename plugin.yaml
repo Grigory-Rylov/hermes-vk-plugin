@@ -1,6 +1,6 @@
 name: vk
 kind: platform
-version: 1.5.0
+version: 1.5.1
 author: Dolgof@voima
 repository: https://github.com/dolgof/hermes-vk-plugin
 docs: https://dev.vk.com/en/api/community-messages/getting-started
