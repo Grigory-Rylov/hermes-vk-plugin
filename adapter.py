@@ -599,6 +599,7 @@ class VKAdapter(BasePlatformAdapter):
         "_run_agent_notify_long_running",  # "⏳ Working — N min" heartbeat
         "_send_busy_reply",             # busy ack ("⏳ Working — … iteration …")
         "_send_busy_ack_reply",
+        "_send_watcher_message",        # background process started/finished/failed
     })
 
     def _progress_lane_caller(self) -> bool:
@@ -1482,17 +1483,38 @@ class VKAdapter(BasePlatformAdapter):
                         # Add downloaded paths to event
                         event.media_urls = [path for path, _, _ in downloaded]
                         event.media_types = [mtype for _, mtype, _ in downloaded]
-                        # Update message type based on downloaded media
+                        # Update message type based on downloaded media.
+                        # VK voice notes arrive as audio_message attachments:
+                        # mark them VOICE (not AUDIO) so the gateway routes
+                        # them into the automatic STT pipeline.
+                        att_types = {a.get("type") for a in attachments}
                         if any(t == "image" for t in event.media_types):
                             event.message_type = MessageType.PHOTO
+                        elif "audio_message" in att_types:
+                            event.message_type = MessageType.VOICE
                         elif any(t == "audio" for t in event.media_types):
                             event.message_type = MessageType.AUDIO
                         elif any(t == "video" for t in event.media_types):
-                            event.message_type = MessageType.VIDEO
+                            event.message_type = MessageType.VOICE if False else MessageType.VIDEO
                         elif any(t == "document" for t in event.media_types):
                             event.message_type = MessageType.DOCUMENT
                 except Exception as e:
                     logger.warning("[VK] Failed to download attachments: %s", e)
+
+            # Voice notes: transcribe eagerly via the local Whisper server so
+            # the command reaches the agent as text even if core STT is off.
+            if event.message_type == MessageType.VOICE:
+                from .stt import transcribe_audio
+                for i, mtype in enumerate(event.media_types):
+                    if mtype != "audio" or i >= len(event.media_urls):
+                        continue
+                    tx = await transcribe_audio(
+                        self._http_client, event.media_urls[i],
+                        limiter=self._limiters.download,
+                    )
+                    if tx:
+                        event.text = f"{text}\n{tx}".strip() if text else tx
+                        break
 
         # Handle forwarded messages
         fwd_messages = message.get("fwd_messages", [])
@@ -1947,6 +1969,11 @@ def validate_config(config) -> bool:
 
 def register(ctx):
     """Plugin entry point — called by the Hermes plugin system."""
+    try:
+        from .tools import register_tools
+        register_tools(ctx)
+    except Exception:
+        logger.warning("[VK] failed to register vk-files tools", exc_info=True)
     ctx.register_platform(
         name="vk",
         label="VK Messenger",
@@ -1974,7 +2001,12 @@ def register(ctx):
             "Reply with show_snackbar (toast), edit_message (navigation). "
             "\n\n=== Carousel ===\n"
             "Use send_carousel() with template={\"type\":\"carousel\",\"elements\":[...]}. "
-            "Each element: title(≤80), description(≤80), photo_id, action, buttons(≤3)."
+            "Each element: title(≤80), description(≤80), photo_id, action, buttons(≤3). "
+            "\n\n=== Files & voice ===\n"
+            "To send a local file to the chat use the vk_send_file tool "
+            "(file_path, optional chat_id/caption): audio (.mp3/.ogg/.wav/.m4a/"
+            ".aac/.flac/.opus) arrives as a playable voice message, anything "
+            "else as a document. Prefer it over MEDIA: tags."
         ),
         emoji="💬",
     )
