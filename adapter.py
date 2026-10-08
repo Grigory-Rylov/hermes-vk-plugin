@@ -1242,6 +1242,22 @@ class VKAdapter(BasePlatformAdapter):
                 self._ts = ts
                 self._group_id = group_id
 
+            # VK only delivers message_event (callback button presses) when the
+            # community's long-poll settings enable it — exec-approval clicks are
+            # silently dropped while the flag is off. Re-assert on every init.
+            settings = await self._vk_api_call_with_token(
+                "groups.setLongPollSettings",
+                {"group_id": group_id, "message_event": 1},
+                token=token,
+            )
+            if not settings or "error" in settings:
+                logger.warning(
+                    "[VK] Failed to enable message_event long-poll delivery for %s "
+                    "(approval buttons will not resolve): %s",
+                    account_id,
+                    (settings or {}).get("error", {}).get("error_msg", settings),
+                )
+
             logger.info(
                 "[VK] Long Poll initialised for %s: server=%s, ts=%s",
                 account_id, server, ts,
