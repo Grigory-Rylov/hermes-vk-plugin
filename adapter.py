@@ -609,7 +609,13 @@ class VKAdapter(BasePlatformAdapter):
             )
             kb.add_button(label[:40], payload=payload, color=color, action_type="callback")
             kb.row()
-        return await self.send_keyboard(prompt.chat_id, prompt.text, kb)
+        result = await self.send_keyboard(prompt.chat_id, prompt.text, kb)
+        logger.info(
+            "[VK] Approval card sent to %s (msg_id=%s choices=%s)",
+            prompt.chat_id, getattr(result, "message_id", None),
+            [c for _, c, _ in prompt.actions],
+        )
+        return result
 
     def _parse_approval_payload(self, payload_raw) -> Optional[Tuple[str, str]]:
         try:
@@ -1717,6 +1723,7 @@ class VKAdapter(BasePlatformAdapter):
 
         if not peer_id or not event_id:
             return
+        logger.info("[VK] Callback (button press) from user %s in chat %s", user_id, peer_id)
         approval = self._parse_approval_payload(payload_raw)
         if approval:
             await self._resolve_approval_click(approval, obj, event_id, peer_id, user_id)
