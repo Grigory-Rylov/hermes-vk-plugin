@@ -58,6 +58,11 @@ INIT_RETRY_BASE = 5    # Base delay for exponential backoff (seconds)
 INIT_RETRY_MAX = 120   # Max delay between init retries (seconds)
 LONG_RECOVERY_DELAY = 300  # Delay in long-recovery mode (5 min)
 
+# VK API error codes that mean the token or group access is broken, not the
+# transport: 5 authorization failed, 15 access denied, 17 user deactivated,
+# 19 http authorization required, 27/28/29 token key/validation failures.
+AUTH_FATAL_ERROR_CODES = frozenset({5, 15, 17, 19, 27, 28, 29})
+
 
 class VKAdapter(BasePlatformAdapter):
     """Adapter for VK Messenger / VKontakte Communities.
@@ -1187,7 +1192,15 @@ class VKAdapter(BasePlatformAdapter):
                     account_id,
                     error.get("error_msg", group_result) if error else group_result,
                 )
-                if account_id == "default":
+                # A result without response and without an API error object is a
+                # transport failure (DNS, timeout, connection): the token verdict
+                # is unknown, so recovery belongs to the poll loop's retry ladder.
+                # Marking fatal here stopped the platform permanently on transient
+                # network outages.
+                if (
+                    account_id == "default"
+                    and error.get("error_code") in AUTH_FATAL_ERROR_CODES
+                ):
                     self._set_fatal_error(
                         "auth_failed",
                         "Invalid VK_GROUP_TOKEN or missing group access",
