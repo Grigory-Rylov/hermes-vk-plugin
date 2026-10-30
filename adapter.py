@@ -202,6 +202,11 @@ class VKAdapter(BasePlatformAdapter):
         # overridden from this set for messages.edit / messages.delete.
         self._progress_msg_ids: set = set()
 
+        # Pending approval cards: session_key -> card message_id. A text-button
+        # press in a group chat arrives as a plain message (no message_event),
+        # so the card to retire is looked up here rather than taken from the event.
+        self._approval_cards: Dict[str, str] = {}
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -601,9 +606,15 @@ class VKAdapter(BasePlatformAdapter):
     }
 
     async def _send_exec_approval_prompt(self, prompt) -> SendResult:
-        """Render the approval card with one callback button per action; a press
-        resolves via tools.approval.resolve_gateway_approval (_resolve_approval_click).
-        Overriding this hook is what flips supports_exec_approval_buttons() on."""
+        """Render the approval card with one TEXT button per action.
+
+        VK does not render callback keyboards in group chats (the message
+        arrives without buttons), so buttons carry a text action with a JSON
+        payload: the press arrives as a regular message whose payload the
+        adapter intercepts in _process_update and resolves via
+        tools.approval.resolve_gateway_approval. Overriding this hook is what
+        flips supports_exec_approval_buttons() on.
+        """
         kb = VKKeyboard(inline=True)
         for label, choice, style in prompt.actions:
             color = {"once": "positive", "deny": "negative"}.get(choice) or \
@@ -612,9 +623,11 @@ class VKAdapter(BasePlatformAdapter):
                 {self._APPROVAL_TAG: {"s": prompt.session_key, "c": choice}},
                 ensure_ascii=False,
             )
-            kb.add_button(label[:40], payload=payload, color=color, action_type="callback")
+            kb.add_button(label[:40], payload=payload, color=color, action_type="text")
             kb.row()
         result = await self.send_keyboard(prompt.chat_id, prompt.text, kb)
+        if result.success and result.message_id:
+            self._approval_cards[prompt.session_key] = result.message_id
         logger.info(
             "[VK] Approval card sent to %s (msg_id=%s choices=%s)",
             prompt.chat_id, getattr(result, "message_id", None),
@@ -653,15 +666,16 @@ class VKAdapter(BasePlatformAdapter):
         return str(peer_id) == chat_id and bool(session_user) and str(user_id or "") == session_user
 
     async def _resolve_approval_click(
-        self, data: Tuple[str, str], obj: dict, event_id: str, peer_id, user_id,
+        self, data: Tuple[str, str], obj: dict, event_id: Optional[str], peer_id, user_id,
     ) -> None:
         session_key, choice = data
         if not self._approval_click_authorized(session_key, user_id, peer_id):
             logger.warning("[VK] Rejected approval click from user %s for session %s", user_id, session_key)
-            await self._answer_callback_event(
-                event_id, peer_id, user_id,
-                json.dumps({"type": "show_snackbar", "text": "Этот запрос не для вас"}, ensure_ascii=False),
-            )
+            if event_id:
+                await self._answer_callback_event(
+                    event_id, peer_id, user_id,
+                    json.dumps({"type": "show_snackbar", "text": "Этот запрос не для вас"}, ensure_ascii=False),
+                )
             return
         count = 0
         try:
@@ -670,15 +684,28 @@ class VKAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.error("[VK] resolve_gateway_approval failed for %s: %s", session_key, e)
         toast = self._APPROVAL_TOAST[choice] if count else "Этот запрос уже не активен"
-        await self._answer_callback_event(
-            event_id, peer_id, user_id,
-            json.dumps({"type": "show_snackbar", "text": toast}, ensure_ascii=False),
-        )
-        message_id = obj.get("message_id")
-        conversation_id = obj.get("conversation_id") or peer_id
-        if message_id and conversation_id:
-            mark = "❌" if choice == "deny" else "✅"
-            await self._retire_approval_card(str(conversation_id), str(message_id), f"{mark} {toast}")
+        if event_id:
+            await self._answer_callback_event(
+                event_id, peer_id, user_id,
+                json.dumps({"type": "show_snackbar", "text": toast}, ensure_ascii=False),
+            )
+        # Card to retire: callback path carries it in the event; the text-button
+        # path (group chats) has no event, so look the card up by session.
+        card_id = None
+        conversation_id = None
+        if event_id:
+            card_id = obj.get("message_id")
+            conversation_id = obj.get("conversation_id") or peer_id
+        else:
+            card_id = self._approval_cards.pop(session_key, None)
+            conversation_id = peer_id
+        mark = "❌" if choice == "deny" else "✅"
+        if card_id and conversation_id:
+            await self._retire_approval_card(str(conversation_id), str(card_id), f"{mark} {toast}")
+        elif not event_id:
+            # No card to edit (e.g. gateway restarted after the card was sent):
+            # confirm the verdict as a reply so the tap never looks ignored.
+            await self.send(str(peer_id), f"{mark} {toast}")
         logger.info(
             "[VK] Approval button resolved %d approval(s) (session=%s choice=%s user=%s)",
             count, session_key, choice, user_id,
@@ -1571,6 +1598,14 @@ class VKAdapter(BasePlatformAdapter):
             return
 
         # Check for keyboard callback payload
+        # Approval-card text buttons arrive here as plain messages (VK group
+        # chats cannot use callback buttons): resolve directly and swallow the
+        # message so it never reaches the agent as chat text.
+        approval = self._parse_approval_payload(message.get("payload"))
+        if approval:
+            await self._resolve_approval_click(approval, message, None, peer_id, user_id)
+            return
+
         callback_data = parse_callback_payload(message)
         if callback_data:
             # Treat keyboard callback as a command-like message

@@ -234,6 +234,21 @@ def _handle_url(token: Token, stack: list[StackFrame]) -> None:
     elif token.type == "lparen":
         # Standalone '(' — treat as literal
         ctx.parts.append(token.value)
+    elif token.type == "bracket_close":
+        # Bare ']' not followed by '(': if a link-text frame is open it was a
+        # literal bracket (e.g. "[model]" in help text) — close it as literal
+        # text instead of leaving it open (unclosed frames leaked "](" garbage).
+        url_idx = _search_stack(stack, "url_text")
+        if url_idx is not None:
+            frames = []
+            while len(stack) > url_idx:
+                frames.append(stack.pop())
+            stack[-1].parts.append("[")
+            for fr in reversed(frames):
+                stack[-1].parts.extend(fr.parts)
+            stack[-1].parts.append("]")
+        else:
+            ctx.parts.append(token.value)
     elif token.type == "url_mid":
         # Search the stack for url_text frame (handles formatting inside links)
         url_idx = _search_stack(stack, "url_text")
@@ -280,9 +295,9 @@ def _process_token(token: Token, stack: list[StackFrame]) -> None:
             _handle_format(token, stack)
         case "u_open" | "u_close":
             _handle_underline(token, stack)
-        case "url_open" | "url_mid" | "url_close" | "lparen":
+        case "url_open" | "url_mid" | "url_close" | "lparen" | "bracket_close":
             _handle_url(token, stack)
-        case "bracket_close" | "word_underscore":
+        case "word_underscore":
             _handle_literal(token, stack)
 
 
@@ -294,8 +309,10 @@ def _apply_fallback(stack: list[StackFrame]) -> None:
             marker = "[" if frame.ctx_type == "url_text" else f"[{frame.url_data or ''}]("
             stack[-1].parts.append(marker)
             stack[-1].parts.extend(frame.parts)
+            # Never emit "](" for an unclosed link-text frame — it renders as
+            # garbage in VK. Close with ']' (url_text) / ')' (url_href) instead.
             if frame.ctx_type == "url_text":
-                stack[-1].parts.append("](")
+                stack[-1].parts.append("]")
             else:
                 stack[-1].parts.append(")")
             continue
