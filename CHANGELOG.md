@@ -1,6 +1,18 @@
 <!-- fullWidth: false tocVisible: false tableWrap: true -->
 # CHANGELOG
 
+## v1.6.5 (2026-10-31)
+
+### Добавлено
+
+- **Нативная cron-доставка `deliver: vk`**: `register_platform()` теперь
+  объявляет `cron_deliver_env_var="VK_HOME_CHANNEL"`. Без этого флага
+  preflight планировщика (`_is_known_delivery_platform`) считал VK неизвестной
+  платформой и блокировал каждую задачу с `deliver: vk:...`
+  (`blocked_config: delivery platform 'vk' is not a known cron delivery
+  target`). Домашний канал берётся из `VK_HOME_CHANNEL` / `home_channel`
+  в конфиге шлюза.
+
 ## v1.6.4 (2026-10-30)
 
 ### Исправлено

@@ -2174,6 +2174,7 @@ def register(ctx):
         install_hint="pip install httpx",
         allowed_users_env="VK_ALLOWED_USERS",
         allow_all_env="VK_ALLOW_ALL_USERS",
+        cron_deliver_env_var="VK_HOME_CHANNEL",  # deliver=vk cron home-channel routing
         max_message_length=MAX_MESSAGE_LENGTH,
         platform_hint=(
             "You are chatting via VK Messenger (VK Мессенджер). "
